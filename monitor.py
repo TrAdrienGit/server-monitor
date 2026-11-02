@@ -130,6 +130,24 @@ def processes(limit=60):
     return procs[:limit]
 
 
+def disks():
+    """Partitions réellement montées (une ligne par périphérique, point de montage le plus court)."""
+    seen = {}
+    for p in psutil.disk_partitions(all=False):
+        if not p.device.startswith("/dev/") or p.device.startswith("/dev/loop"):
+            continue
+        if p.device not in seen or len(p.mountpoint) < len(seen[p.device].mountpoint):
+            seen[p.device] = p
+    result = []
+    for dev, p in seen.items():
+        try:
+            u = psutil.disk_usage(p.mountpoint)
+        except OSError:
+            continue
+        result.append({"device": dev, "mount": p.mountpoint, "fstype": p.fstype, "used": u.used, "total": u.total})
+    return sorted(result, key=lambda d: d["mount"])
+
+
 def stats():
     vm, sw = psutil.virtual_memory(), psutil.swap_memory()
     disk = psutil.disk_usage("/")
@@ -143,6 +161,7 @@ def stats():
         "ram": {"used": vm.total - vm.available, "total": vm.total, "percent": vm.percent},
         "swap": {"used": sw.used, "total": sw.total},
         "disk": {"used": disk.used, "total": disk.total},
+        "disks": disks(),
         "gpus": gpus(),
         "temps": temperatures(),
         "battery": battery(),

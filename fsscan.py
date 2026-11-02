@@ -1,14 +1,16 @@
 """Navigateur de fichiers façon WinDirStat : scan du disque en mémoire, tailles cumulées, treemap.
 
 Un nœud est une liste [nom, taille_disque, nb_fichiers, enfants] ; enfants vaut None pour un fichier.
-La taille est l'espace réellement occupé (st_blocks * 512). Le scan reste sur le système de fichiers
-de départ (pas de /proc, /sys, montages snap…) et ne suit pas les liens symboliques.
+La taille est l'espace réellement occupé (st_blocks * 512). Le scan traverse les partitions montées
+sur /dev/* (pas de /proc, /sys, montages snap…) et ne suit pas les liens symboliques.
 """
 import ctypes
 import os
 import stat
 import threading
 import time
+
+import psutil
 
 _state = {"root": None, "tree": None, "running": False, "files": 0, "bytes": 0,
           "started": None, "finished": None, "error": None}
@@ -39,7 +41,17 @@ def birth_time(path):
 
 # ---------- Scan ----------
 
-def _scan_dir(path, name, dev):
+def _mount_roots():
+    """Points de montage à traverser : un par partition /dev/*, le plus court (ignore les montages bind en double)."""
+    best = {}
+    for p in psutil.disk_partitions(all=False):
+        if p.device.startswith("/dev/") and not p.device.startswith("/dev/loop"):
+            if p.device not in best or len(p.mountpoint) < len(best[p.device]):
+                best[p.device] = p.mountpoint
+    return set(best.values())
+
+
+def _scan_dir(path, name, dev, mounts):
     size, count, children = 0, 0, []
     try:
         it = os.scandir(path)
@@ -52,9 +64,9 @@ def _scan_dir(path, name, dev):
             except OSError:
                 continue
             if stat.S_ISDIR(st.st_mode):
-                if st.st_dev != dev:
+                if st.st_dev != dev and e.path not in mounts:
                     continue
-                child = _scan_dir(e.path, e.name, dev)
+                child = _scan_dir(e.path, e.name, st.st_dev, mounts)
                 child[1] += st.st_blocks * 512
             else:
                 child = [e.name, st.st_blocks * 512, 1, None]
@@ -70,7 +82,7 @@ def _scan_dir(path, name, dev):
 def _run(root):
     try:
         dev = os.lstat(root).st_dev
-        tree = _scan_dir(root, root, dev)
+        tree = _scan_dir(root, root, dev, _mount_roots())
         with _lock:
             _state.update(tree=tree, root=root, finished=time.time(), error=None)
             _ext_cache.clear()

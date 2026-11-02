@@ -72,6 +72,7 @@
   <div class="card"><h2>Mémoire</h2><div class="big" id="ram">–</div><div class="bar"><div id="ramBar"></div></div><div class="mut" id="ramMeta"></div></div>
   <div class="card"><h2>GPU</h2><div id="gpu" class="mut">Aucun GPU NVIDIA détecté</div></div>
   <div class="card"><h2>Batterie</h2><div class="big" id="bat">–</div><div class="bar"><div id="batBar"></div></div><div class="mut" id="batMeta"></div></div>
+  <div class="card"><h2>Disques</h2><div id="disks"></div></div>
   <div class="card"><h2>Températures</h2><table id="temps"></table></div>
   <div class="card wide"><h2>Historique batterie
     <select id="hours"><option value="6">6 h</option><option value="24" selected>24 h</option><option value="168">7 j</option><option value="720">30 j</option></select></h2>
@@ -92,7 +93,7 @@ async function refreshStats() {
   const s = await (await fetch("api/stats")).json();
   $("host").textContent = s.hostname;
   const up = s.uptime_s, d = Math.floor(up / 86400), h = Math.floor(up % 86400 / 3600);
-  $("meta").textContent = `allumé depuis ${d} j ${h} h · charge ${s.load.map(x => x.toFixed(2)).join(" ")} · disque / ${gb(s.disk.used)} / ${gb(s.disk.total)} · ${new Date().toLocaleTimeString()}`;
+  $("meta").textContent = `allumé depuis ${d} j ${h} h · charge ${s.load.map(x => x.toFixed(2)).join(" ")} · ${new Date().toLocaleTimeString()}`;
   $("cpu").textContent = s.cpu.percent.toFixed(0) + " %"; bar("cpuBar", s.cpu.percent);
   $("cpuMeta").textContent = `${s.cpu.per_core.length} cœurs${s.cpu.freq_mhz ? " · " + s.cpu.freq_mhz + " MHz" : ""}`;
   $("ram").textContent = `${gb(s.ram.used)} / ${gb(s.ram.total)}`; bar("ramBar", s.ram.percent);
@@ -110,6 +111,10 @@ async function refreshStats() {
     const st = {Charging:"en charge", Discharging:"sur batterie", Full:"pleine", "Not charging":"branchée, pas en charge"}[b.status] || b.status;
     $("batMeta").textContent = `${st}${b.watts != null ? " · " + b.watts + " W" : ""}${b.health_percent ? " · santé " + b.health_percent + " %" : ""}`;
   } else $("bat").textContent = "aucune";
+  $("disks").innerHTML = s.disks.map(d => { const pct = 100 * d.used / d.total, col = pct > 90 ? "var(--bad)" : pct > 75 ? "var(--warn)" : "var(--acc)";
+    return `<div><b>${esc(d.mount)}</b> <span class="mut">${esc(d.device)} · ${esc(d.fstype)}</span></div>
+      <div class="bar"><div style="width:${pct}%;background:${col}"></div></div>
+      <div class="mut" style="margin-bottom:8px">${gb(d.used)} / ${gb(d.total)} · ${pct.toFixed(0)} % · ${gb(d.total - d.used)} libres</div>`; }).join("");
   $("temps").innerHTML = s.temps.map(t => `<tr><td>${esc(t.label)}</td><td class="mut">${esc(t.chip)}</td><td class="${tempClass(t.c, t.high)}">${t.c.toFixed(0)} °C</td></tr>`).join("")
     + s.gpus.map(g => `<tr><td>GPU</td><td class="mut">nvidia</td><td class="${tempClass(g.temp_c)}">${g.temp_c} °C</td></tr>`).join("");
   const procs = s.processes.sort((a, b) => sortKey === "name" ? a.name.localeCompare(b.name) : b[sortKey] - a[sortKey]);

@@ -72,6 +72,10 @@
   <div class="card"><h2>Mémoire</h2><div class="big" id="ram">–</div><div class="bar"><div id="ramBar"></div></div><div class="mut" id="ramMeta"></div></div>
   <div class="card"><h2>GPU</h2><div id="gpu" class="mut">Aucun GPU NVIDIA détecté</div></div>
   <div class="card"><h2>Batterie</h2><div class="big" id="bat">–</div><div class="bar"><div id="batBar"></div></div><div class="mut" id="batMeta"></div></div>
+  <div class="card"><h2>Génération d'images</h2>
+    <div class="big" id="cuState">–</div>
+    <div style="margin:8px 0"><button id="cuBtn" disabled>…</button> <a id="cuLink" href="#" target="_blank" rel="noopener" hidden>Ouvrir ComfyUI ↗</a></div>
+    <div class="mut" id="cuNote">ComfyUI libère la VRAM d'Ollama à son démarrage : PdC sera plus lent tant qu'il tourne.</div></div>
   <div class="card"><h2>Disques</h2><div id="disks"></div></div>
   <div class="card"><h2>Températures</h2><table id="temps"></table></div>
   <div class="card wide"><h2>Historique batterie
@@ -276,8 +280,31 @@ async function pollScan() {
 }
 api("api/fs/status").then(s => { if (s.running) { scanTimer = setInterval(pollScan, 1000); } else if (s.finished) $("scanStatus").textContent = `Analysé ${s.root} le ${fmtDate(s.finished)}`; }).catch(() => {});
 
+// ---------- ComfyUI (génération d'images) ----------
+let cuState = null;
+const CU_LABEL = {active: "Allumé", inactive: "Éteint", activating: "Démarrage…", deactivating: "Arrêt…", failed: "En erreur", indisponible: "Indisponible"};
+function renderComfy(c) {
+  cuState = c.state;
+  const on = c.state === "active" || c.state === "activating";
+  $("cuState").textContent = CU_LABEL[c.state] || c.state;
+  $("cuState").className = "big " + (c.state === "active" ? "ok" : c.state === "failed" ? "bad" : "");
+  $("cuBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("cuBtn").disabled = c.state === "indisponible" || c.state === "deactivating";
+  $("cuLink").hidden = c.state !== "active";
+  $("cuLink").href = `http://${location.hostname}:${c.port}/`;
+}
+async function refreshComfy() { renderComfy(await (await fetch("api/comfyui")).json()); }
+$("cuBtn").addEventListener("click", async () => {
+  const on = cuState === "active" || cuState === "activating";
+  if (!on && !confirm("Allumer ComfyUI ? Il décharge les modèles Ollama de la VRAM (PdC sera plus lent).")) return;
+  $("cuBtn").disabled = true;
+  const r = await fetch("api/comfyui/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderComfy(await r.json());
+  setTimeout(() => refreshComfy().catch(() => {}), 3000);
+});
+
 const safe = f => () => f().catch(err => console.error(err));
-safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)();
+safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)(); safe(refreshComfy)(); setInterval(safe(refreshComfy), 5000);
 setInterval(safe(refreshStats), 3000); setInterval(safe(refreshChart), 60000); setInterval(safe(refreshErrors), 60000);
 </script>
 </body>

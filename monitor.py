@@ -40,6 +40,26 @@ ALLOWED_NETS = [ipaddress.ip_network(n) for n in
                 ("100.64.0.0/10", "fd7a:115c:a1e0::/48", "127.0.0.0/8", "::1/128")]
 
 
+COMFY_USER = setting("comfyui_user", "")
+COMFY_UNIT = setting("comfyui_unit", "comfyui.service")
+COMFY_PORT = int(setting("comfyui_port", "8188"))
+
+
+def comfyui(action):
+    """État / démarrage / arrêt de la seule unité utilisateur ComfyUI. Aucune autre unité ni action n'est accessible."""
+    if action not in ("is-active", "start", "stop"):
+        raise ValueError(action)
+    import pwd
+    try:
+        uid = pwd.getpwnam(COMFY_USER).pw_uid
+    except KeyError:
+        return "indisponible"
+    cmd = ["runuser", "-u", COMFY_USER, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+           "systemctl", "--user"] + (["--no-block"] if action == "start" else []) + [action, COMFY_UNIT]
+    out = run(cmd, timeout=30).strip()
+    return out if action == "is-active" else comfyui("is-active")
+
+
 def run(cmd, timeout=10):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
@@ -270,11 +290,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):
+    def allowed(self):
         ip = ipaddress.ip_address(self.client_address[0].removeprefix("::ffff:"))
-        if not any(ip in n for n in ALLOWED_NETS):
-            return self.send(403, {"error": "forbidden"})
+        if any(ip in n for n in ALLOWED_NETS):
+            return True
+        self.send(403, {"error": "forbidden"})
+        return False
+
+    def do_POST(self):
+        if not self.allowed():
+            return
+        # En-tête personnalisé exigé : une page tierce ne peut pas l'envoyer sans préalable CORS (que l'on ne répond jamais).
+        if self.headers.get("X-Monitor-Action") != "1":
+            return self.send(400, {"error": "en-tête manquant"})
+        action = {"/api/comfyui/start": "start", "/api/comfyui/stop": "stop"}.get(self.path.partition("?")[0])
+        if not action:
+            return self.send(404, {"error": "not found"})
+        self.send(200, {"state": comfyui(action), "port": COMFY_PORT})
+
+    def do_GET(self):
+        if not self.allowed():
+            return
         path, _, query = self.path.partition("?")
+        if path == "/api/comfyui":
+            return self.send(200, {"state": comfyui("is-active"), "port": COMFY_PORT})
         if path == "/":
             return self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
         if path in ("/favicon.svg", "/favicon.ico"):

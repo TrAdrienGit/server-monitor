@@ -1,0 +1,21 @@
+[Unit]
+Description=Supervision serveur (lecture seule, Tailscale uniquement)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+# Lié uniquement à l'IP Tailscale (config.ini, sinon `tailscale ip -4`) :
+# le service échoue et réessaie tant que Tailscale n'a pas d'adresse.
+ExecStart=/usr/bin/python3 /opt/server-monitor/monitor.py
+Restart=always
+RestartSec=10
+# root est nécessaire pour journalctl -k, smartctl et la commande de chaque processus.
+User=root
+Nice=10
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-monitor
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

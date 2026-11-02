@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supervision serveur</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --fg:#e6e9ee; --mut:#8a94a3; --acc:#4ea1ff; --ok:#3fbf6f; --warn:#e6a23c; --bad:#e5534b; --line:#2a313b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+  header { padding:12px 16px; display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; } h2 { font-size:14px; margin:0 0 8px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+  main { padding:16px; display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background:var(--card); border-radius:8px; padding:12px; min-width:0; }
+  .wide { grid-column:1 / -1; }
+  .big { font-size:26px; font-weight:600; }
+  .mut { color:var(--mut); }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:6px 0; }
+  .bar > div { height:100%; background:var(--acc); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td.cmd { max-width:420px; overflow:hidden; text-overflow:ellipsis; color:var(--mut); }
+  th { cursor:pointer; color:var(--mut); font-weight:500; }
+  .scroll { overflow-x:auto; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  pre { margin:4px 0 10px; font-size:12px; white-space:pre-wrap; word-break:break-all; color:var(--mut); max-height:200px; overflow:auto; }
+  details summary { cursor:pointer; padding:4px 0; }
+  svg { width:100%; height:180px; display:block; }
+  select { background:var(--line); color:var(--fg); border:0; border-radius:4px; padding:2px 6px; }
+</style>
+</head>
+<body>
+<header><h1 id="host">Serveur</h1><span class="mut" id="meta"></span></header>
+<main>
+  <div class="card"><h2>CPU</h2><div class="big" id="cpu">–</div><div class="bar"><div id="cpuBar"></div></div><div class="mut" id="cpuMeta"></div></div>
+  <div class="card"><h2>Mémoire</h2><div class="big" id="ram">–</div><div class="bar"><div id="ramBar"></div></div><div class="mut" id="ramMeta"></div></div>
+  <div class="card"><h2>GPU</h2><div id="gpu" class="mut">Aucun GPU NVIDIA détecté</div></div>
+  <div class="card"><h2>Batterie</h2><div class="big" id="bat">–</div><div class="bar"><div id="batBar"></div></div><div class="mut" id="batMeta"></div></div>
+  <div class="card"><h2>Températures</h2><table id="temps"></table></div>
+  <div class="card wide"><h2>Historique batterie
+    <select id="hours"><option value="6">6 h</option><option value="24" selected>24 h</option><option value="168">7 j</option><option value="720">30 j</option></select></h2>
+    <svg id="chart" preserveAspectRatio="none"></svg></div>
+  <div class="card wide"><h2>Erreurs matérielles / stabilité</h2><div id="errors" class="mut">Chargement…</div></div>
+  <div class="card wide"><h2>Processus</h2><div class="scroll"><table id="procs"></table></div></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const gb = b => (b / 2**30).toFixed(1) + " Go";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const tempClass = (c, hi) => c >= (hi || 90) ? "bad" : c >= (hi ? hi - 10 : 75) ? "warn" : "ok";
+let sortKey = "cpu";
+
+function bar(id, pct) { const el = $(id); el.style.width = Math.min(100, pct) + "%"; el.style.background = pct > 90 ? "var(--bad)" : pct > 75 ? "var(--warn)" : "var(--acc)"; }
+
+async function refreshStats() {
+  const s = await (await fetch("api/stats")).json();
+  $("host").textContent = s.hostname;
+  const up = s.uptime_s, d = Math.floor(up / 86400), h = Math.floor(up % 86400 / 3600);
+  $("meta").textContent = `allumé depuis ${d} j ${h} h · charge ${s.load.map(x => x.toFixed(2)).join(" ")} · disque / ${gb(s.disk.used)} / ${gb(s.disk.total)} · ${new Date().toLocaleTimeString()}`;
+  $("cpu").textContent = s.cpu.percent.toFixed(0) + " %"; bar("cpuBar", s.cpu.percent);
+  $("cpuMeta").textContent = `${s.cpu.per_core.length} cœurs${s.cpu.freq_mhz ? " · " + s.cpu.freq_mhz + " MHz" : ""}`;
+  $("ram").textContent = `${gb(s.ram.used)} / ${gb(s.ram.total)}`; bar("ramBar", s.ram.percent);
+  $("ramMeta").textContent = `${s.ram.percent} % · swap ${gb(s.swap.used)} / ${gb(s.swap.total)}`;
+  if (s.gpus.length) $("gpu").innerHTML = s.gpus.map(g => {
+    const pct = 100 * g.mem_used_mb / g.mem_total_mb;
+    return `<div>${esc(g.name)}</div><div class="big">${(g.mem_used_mb/1024).toFixed(1)} / ${(g.mem_total_mb/1024).toFixed(1)} Go</div>
+      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="mut">VRAM ${pct.toFixed(0)} % · util ${g.util_percent ?? "?"} % · <span class="${tempClass(g.temp_c)}">${g.temp_c ?? "?"} °C</span>${g.power_w != null ? " · " + g.power_w + " W" : ""}</div>`;
+  }).join("");
+  const b = s.battery;
+  if (b) {
+    $("bat").textContent = b.percent + " %"; bar("batBar", 100 - b.percent);
+    $("batBar").style.width = b.percent + "%"; $("batBar").style.background = b.percent < 20 ? "var(--bad)" : "var(--ok)";
+    const st = {Charging:"en charge", Discharging:"sur batterie", Full:"pleine", "Not charging":"branchée, pas en charge"}[b.status] || b.status;
+    $("batMeta").textContent = `${st}${b.watts != null ? " · " + b.watts + " W" : ""}${b.health_percent ? " · santé " + b.health_percent + " %" : ""}`;
+  } else $("bat").textContent = "aucune";
+  $("temps").innerHTML = s.temps.map(t => `<tr><td>${esc(t.label)}</td><td class="mut">${esc(t.chip)}</td><td class="${tempClass(t.c, t.high)}">${t.c.toFixed(0)} °C</td></tr>`).join("")
+    + s.gpus.map(g => `<tr><td>GPU</td><td class="mut">nvidia</td><td class="${tempClass(g.temp_c)}">${g.temp_c} °C</td></tr>`).join("");
+  const procs = s.processes.sort((a, b) => sortKey === "name" ? a.name.localeCompare(b.name) : b[sortKey] - a[sortKey]);
+  $("procs").innerHTML = `<tr><th data-k="pid">PID</th><th data-k="name">Nom</th><th>Utilisateur</th><th data-k="cpu">CPU %</th><th data-k="rss_mb">RAM</th><th data-k="mem">RAM %</th><th>Commande</th></tr>`
+    + procs.map(p => `<tr><td>${p.pid}</td><td>${esc(p.name)}</td><td class="mut">${esc(p.user)}</td><td>${p.cpu}</td><td>${p.rss_mb} Mo</td><td>${p.mem}</td><td class="cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</td></tr>`).join("");
+}
+$("procs").addEventListener("click", e => { if (e.target.dataset.k) { sortKey = e.target.dataset.k; refreshStats(); } });
+
+async function refreshChart() {
+  const rows = await (await fetch("api/battery-history?hours=" + $("hours").value)).json();
+  const svg = $("chart"), W = svg.clientWidth || 800, H = 180, P = 28;
+  if (rows.length < 2) { svg.innerHTML = `<text x="10" y="90" fill="#8a94a3">Pas encore assez de mesures</text>`; return; }
+  const t0 = rows[0].ts, t1 = rows[rows.length - 1].ts, x = t => P + (t - t0) / (t1 - t0 || 1) * (W - P - 6), y = p => 6 + (100 - p) / 100 * (H - 26);
+  let grid = "";
+  for (const p of [0, 25, 50, 75, 100]) grid += `<line x1="${P}" x2="${W}" y1="${y(p)}" y2="${y(p)}" stroke="#2a313b"/><text x="0" y="${y(p) + 4}" fill="#8a94a3" font-size="10">${p}%</text>`;
+  for (let i = 0; i <= 4; i++) { const t = t0 + (t1 - t0) * i / 4, d = new Date(t * 1000);
+    grid += `<text x="${x(t)}" y="${H - 4}" fill="#8a94a3" font-size="10" text-anchor="${i ? i === 4 ? "end" : "middle" : "start"}">${d.toLocaleDateString(undefined, {day:"2-digit", month:"2-digit"})} ${d.toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit"})}</text>`; }
+  const pts = rows.map(r => `${x(r.ts).toFixed(1)},${y(r.percent).toFixed(1)}`).join(" ");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = grid + `<polyline points="${pts}" fill="none" stroke="#4ea1ff" stroke-width="2"/>`;
+}
+$("hours").addEventListener("change", refreshChart);
+
+function section(title, lines, okText) {
+  const n = lines.length;
+  if (!n) return `<div><span class="ok">✔</span> ${title} : ${okText || "rien"}</div>`;
+  return `<details><summary><span class="warn">⚠</span> ${title} : ${n} ligne(s)</summary><pre>${esc(lines.join("\n"))}</pre></details>`;
+}
+async function refreshErrors() {
+  const e = await (await fetch("api/errors")).json();
+  let html = section("Erreurs noyau (7 j)", e.kernel_errors) + section("Erreurs système err+ (24 h)", e.system_errors)
+    + section("MCE / erreurs matérielles (30 j)", e.mce) + section("OOM kills (30 j)", e.oom) + section("Throttling thermique (7 j)", e.throttling);
+  const edac = Object.entries(e.edac);
+  html += edac.length ? `<div>EDAC : ${edac.map(([k, v]) => `${k} corrigées ${v.ce} / non corrigées <span class="${v.ue > 0 ? "bad" : "ok"}">${v.ue}</span>`).join(" · ")}</div>` : `<div class="mut">EDAC : non disponible sur ce matériel</div>`;
+  if (!e.smart.available) html += `<div class="mut">SMART : installer smartmontools pour l'activer</div>`;
+  else html += e.smart.disks.map(d => `<div>SMART ${esc(d.device)} ${esc(d.model)} : <span class="${d.passed ? "ok" : "bad"}">${d.passed ? "OK" : "ÉCHEC"}</span>${d.temp_c != null ? " · " + d.temp_c + " °C" : ""}${d.media_errors != null ? " · erreurs média " + d.media_errors : ""}${d.percent_used != null ? " · usure " + d.percent_used + " %" : ""}${d.critical_warning ? ' · <span class="bad">alerte critique ' + d.critical_warning + "</span>" : ""}</div>`).join("");
+  html += `<details><summary class="mut">Derniers démarrages</summary><pre>${esc(e.boots.join("\n"))}</pre></details>`;
+  $("errors").innerHTML = html;
+}
+
+const safe = f => () => f().catch(err => console.error(err));
+safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)();
+setInterval(safe(refreshStats), 3000); setInterval(safe(refreshChart), 60000); setInterval(safe(refreshErrors), 60000);
+</script>
+</body>
+</html>

@@ -60,6 +60,47 @@ def comfyui(action):
     return out if action == "is-active" else comfyui("is-active")
 
 
+def service_catalog():
+    """Liste blanche lue dans services.json : {unité: options}, plus la structure par groupes."""
+    data = json.loads((HERE / "services.json").read_text(encoding="utf-8"))
+    return data["groups"], {u["unit"]: u for g in data["groups"] for u in g["units"]}
+
+
+def services():
+    groups, catalog = service_catalog()
+    props = "Id,Description,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,MemoryCurrent"
+    out = run(["systemctl", "show", "-p", props] + list(catalog), timeout=20)
+    info = {}
+    for block in out.strip().split("\n\n"):
+        d = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if "Id" in d:
+            info[d["Id"]] = d
+    result = []
+    for g in groups:
+        items = []
+        for u in g["units"]:
+            d = info.get(u["unit"], {})
+            mem = d.get("MemoryCurrent", "")
+            items.append({"unit": u["unit"], "description": d.get("Description", ""),
+                          "installed": d.get("LoadState") not in (None, "not-found"),
+                          "active": d.get("ActiveState", "inactive"), "sub": d.get("SubState", ""),
+                          "enabled": d.get("UnitFileState", ""), "since": d.get("ActiveEnterTimestamp", ""),
+                          "memory": int(mem) if mem.isdigit() else None,
+                          "protected": bool(u.get("protected")), "timer": bool(u.get("timer"))})
+        result.append({"name": g["name"], "units": items})
+    return result
+
+
+def service_action(action, unit):
+    """start/restart d'une unité de la liste blanche, hors unités protégées et minuteurs."""
+    _, catalog = service_catalog()
+    entry = catalog.get(unit)
+    if action not in ("start", "restart") or not entry or entry.get("protected") or entry.get("timer"):
+        return None
+    run(["systemctl", "--no-block", action, unit], timeout=20)
+    return True
+
+
 def run(cmd, timeout=10):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
@@ -303,7 +344,12 @@ class Handler(BaseHTTPRequestHandler):
         # En-tête personnalisé exigé : une page tierce ne peut pas l'envoyer sans préalable CORS (que l'on ne répond jamais).
         if self.headers.get("X-Monitor-Action") != "1":
             return self.send(400, {"error": "en-tête manquant"})
-        action = {"/api/comfyui/start": "start", "/api/comfyui/stop": "stop"}.get(self.path.partition("?")[0])
+        path, _, query = self.path.partition("?")
+        if path in ("/api/services/start", "/api/services/restart"):
+            if not service_action(path.rsplit("/", 1)[1], parse_qs(query).get("unit", [""])[0]):
+                return self.send(403, {"error": "unité ou action non autorisée"})
+            return self.send(200, {"ok": True})
+        action = {"/api/comfyui/start": "start", "/api/comfyui/stop": "stop"}.get(path)
         if not action:
             return self.send(404, {"error": "not found"})
         self.send(200, {"state": comfyui(action), "port": COMFY_PORT})
@@ -312,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         path, _, query = self.path.partition("?")
+        if path == "/api/services":
+            return self.send(200, services())
         if path == "/api/comfyui":
             return self.send(200, {"state": comfyui("is-active"), "port": COMFY_PORT})
         if path == "/":

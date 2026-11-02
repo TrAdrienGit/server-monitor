@@ -1,0 +1,36 @@
+{
+  "_doc": "Liste blanche des unités systemd suivies. Seules ces unités sont visibles et pilotables. protected = pas de bouton ; timer = minuteur (pas de bouton) ; ondemand = pas censé tourner en permanence.",
+  "groups": [
+    {"name": "Projet-PdC", "units": [
+      {"unit": "pdc-api.service"},
+      {"unit": "pdc-achats.service"},
+      {"unit": "pdc-agenda.service"},
+      {"unit": "pdc-controle.service"},
+      {"unit": "pdc-corruption.service"},
+      {"unit": "pdc-education.service"},
+      {"unit": "pdc-entrainement.service"},
+      {"unit": "pdc-menu.service"},
+      {"unit": "pdc-notif.service"},
+      {"unit": "pdc-ordres.service"},
+      {"unit": "pdc-profil.service"},
+      {"unit": "pdc-securite.service"},
+      {"unit": "pdc-tenue.service"},
+      {"unit": "pdc-backup.timer", "timer": true}
+    ]},
+    {"name": "Phantasmon", "units": [
+      {"unit": "phantasmon-backend.service"},
+      {"unit": "phantasmon-backup.timer", "timer": true}
+    ]},
+    {"name": "Bases de données et IA", "units": [
+      {"unit": "postgresql@18-main.service"},
+      {"unit": "ollama.service"}
+    ]},
+    {"name": "Serveur Minecraft", "units": [
+      {"unit": "minecraft.service"}
+    ]},
+    {"name": "Réseau et supervision", "units": [
+      {"unit": "server-monitor.service", "protected": true},
+      {"unit": "tailscaled.service", "protected": true}
+    ]}
+  ]
+}

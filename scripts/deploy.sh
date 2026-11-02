@@ -7,7 +7,7 @@ HOST="$(sed -n 's/^ssh_target *= *//p' config.ini | tr -d '\r')"
 [ -n "$HOST" ] || { echo "ssh_target vide dans config.ini" >&2; exit 1; }
 
 ssh "$HOST" 'mkdir -p /opt/server-monitor /var/lib/server-monitor'
-scp monitor.py fsscan.py index.html favicon.svg config.ini "$HOST:/opt/server-monitor/"
+scp monitor.py fsscan.py services.json index.html favicon.svg config.ini "$HOST:/opt/server-monitor/"
 scp server-monitor.service "$HOST:/etc/systemd/system/server-monitor.service"
 ssh "$HOST" 'set -e
   python3 -c "import psutil" 2>/dev/null || apt-get install -y python3-psutil

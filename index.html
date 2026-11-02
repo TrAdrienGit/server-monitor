@@ -27,12 +27,46 @@
   pre { margin:4px 0 10px; font-size:12px; white-space:pre-wrap; word-break:break-all; color:var(--mut); max-height:200px; overflow:auto; }
   details summary { cursor:pointer; padding:4px 0; }
   svg { width:100%; height:180px; display:block; }
+  nav { display:flex; gap:4px; }
+  button, input { background:var(--line); color:var(--fg); border:0; border-radius:4px; padding:5px 10px; font:inherit; }
+  button { cursor:pointer; } button:hover { filter:brightness(1.3); }
+  .tab.on { background:var(--acc); color:#000; }
+  #files { padding:12px 16px; display:flex; flex-direction:column; gap:8px; }
+  .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  #fsPath { flex:1; min-width:160px; font-family:monospace; }
+  .split { display:grid; grid-template-columns:1fr 240px; gap:8px; height:38vh; }
+  .split .card { overflow:auto; padding:6px; }
+  @media (max-width:700px) { .split { grid-template-columns:1fr; height:auto; } .split .list { max-height:45vh; } .legend { max-height:20vh; } }
+  #fsList tr.dir td.nm { cursor:pointer; color:var(--acc); }
+  #fsList tr.sel { background:#2c3a4d; }
+  .pb { width:110px; height:10px; background:var(--line); border-radius:2px; overflow:hidden; }
+  .pb > div { height:100%; background:#7a8fb0; }
+  .sw { display:inline-block; width:22px; height:12px; border-radius:2px; vertical-align:middle; }
+  #treemap { width:100%; height:48vh; background:#000; border-radius:6px; cursor:crosshair; }
+  #tmInfo { font-family:monospace; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   select { background:var(--line); color:var(--fg); border:0; border-radius:4px; padding:2px 6px; }
 </style>
 </head>
 <body>
-<header><h1 id="host">Serveur</h1><span class="mut" id="meta"></span></header>
-<main>
+<header><h1 id="host">Serveur</h1>
+  <nav><button class="tab on" data-tab="tasks">Gestionnaire des tâches</button><button class="tab" data-tab="files">Navigateur</button></nav>
+  <span class="mut" id="meta"></span></header>
+<section id="files" hidden>
+  <div class="toolbar">
+    <button id="up" title="Dossier parent">↑</button>
+    <input id="fsPath" value="/" spellcheck="false">
+    <button id="go">Ouvrir</button>
+    <button id="scan" title="Recalcule les tailles de tout le disque">Analyser le disque</button>
+    <span class="mut" id="scanStatus"></span>
+  </div>
+  <div class="split">
+    <div class="card scroll list"><table id="fsList"></table></div>
+    <div class="card scroll legend"><table id="fsExt"></table></div>
+  </div>
+  <canvas id="treemap"></canvas>
+  <div class="mut" id="tmInfo">Survoler le treemap pour voir un fichier · double-clic pour ouvrir son dossier</div>
+</section>
+<main id="tasks">
   <div class="card"><h2>CPU</h2><div class="big" id="cpu">–</div><div class="bar"><div id="cpuBar"></div></div><div class="mut" id="cpuMeta"></div></div>
   <div class="card"><h2>Mémoire</h2><div class="big" id="ram">–</div><div class="bar"><div id="ramBar"></div></div><div class="mut" id="ramMeta"></div></div>
   <div class="card"><h2>GPU</h2><div id="gpu" class="mut">Aucun GPU NVIDIA détecté</div></div>
@@ -114,6 +148,127 @@ async function refreshErrors() {
   html += `<details><summary class="mut">Derniers démarrages</summary><pre>${esc(e.boots.join("\n"))}</pre></details>`;
   $("errors").innerHTML = html;
 }
+
+// ---------- Onglets ----------
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === b));
+  $("tasks").hidden = b.dataset.tab !== "tasks"; $("files").hidden = b.dataset.tab !== "files";
+  if (b.dataset.tab === "files") { if (!fsLoaded) openPath($("fsPath").value); else drawTreemap(); }
+}));
+
+// ---------- Navigateur de fichiers ----------
+const human = b => { const u = ["o", "Kio", "Mio", "Gio", "Tio"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return (i ? b.toFixed(b < 10 ? 2 : 1) : b) + " " + u[i]; };
+const fmtDate = t => t ? new Date(t * 1000).toLocaleString(undefined, {dateStyle:"short", timeStyle:"short"}) : "–";
+const joinPath = (a, b) => (a.endsWith("/") ? a : a + "/") + b;
+const PALETTE = ["#5b5bff", "#ff4b4b", "#4bff4b", "#e8e800", "#00e0e0", "#ff3bff", "#ffaa2b", "#2bb5ff", "#b4ff2b", "#ff2b8f", "#9b6bff", "#2bffb0", "#c08a50", "#ff7d7d", "#7dd0ff"];
+let fsLoaded = false, curPath = "/", extColor = {}, tmTree = null, tmRects = [], sortFs = "size", lastList = null;
+
+const api = async url => { const r = await fetch(url); const j = await r.json(); if (!r.ok) throw Object.assign(new Error(j.error), {status: r.status}); return j; };
+
+async function openPath(p) {
+  p = p.trim() || "/";
+  try {
+    const [list, exts, tree] = await Promise.all([
+      api("api/fs/list?path=" + encodeURIComponent(p)), api("api/fs/extensions?path=" + encodeURIComponent(p)), api("api/fs/treemap?path=" + encodeURIComponent(p))]);
+    fsLoaded = true; curPath = list.path; $("fsPath").value = curPath;
+    extColor = {}; exts.forEach((e, i) => { if (i < PALETTE.length) extColor[e[0]] = PALETTE[i]; });
+    lastList = list; renderList(); renderExts(exts, list.size); tmTree = tree; drawTreemap();
+  } catch (e) {
+    const s = e.status === 409 ? await api("api/fs/status") : null;
+    if (s && !s.root && !s.running) { curPath = p; $("scanStatus").textContent = "Aucune analyse encore : lancement…"; startScan("/"); }
+    else if (s) $("scanStatus").textContent = `${p} n'est pas dans l'analyse (autre partition, ou dossier introuvable)`;
+    else $("scanStatus").textContent = "Erreur : " + e.message;
+  }
+}
+
+function renderList() {
+  const l = lastList, total = l.size || 1;
+  const items = [...l.items].sort((a, b) => sortFs === "name" ? a.name.localeCompare(b.name) : (b[sortFs] ?? 0) - (a[sortFs] ?? 0));
+  $("fsList").innerHTML = `<tr><th data-k="name">Nom</th><th data-k="size">Proportion</th><th data-k="size">%</th><th data-k="size">Taille</th><th data-k="files">Fichiers</th><th data-k="created">Créé le</th><th data-k="modified">Modifié le</th></tr>`
+    + `<tr><td><b>${esc(l.path)}</b></td><td></td><td>100 %</td><td><b>${human(l.size)}</b></td><td>${l.files}</td><td>${fmtDate(l.created)}</td><td></td></tr>`
+    + items.map(it => { const pct = 100 * it.size / total, c = it.dir ? "#d8b04a" : (extColor[it.ext] || "#888");
+      return `<tr class="${it.dir ? "dir" : ""}" data-name="${esc(it.name)}"><td class="nm"><span class="sw" style="width:10px;background:${c}"></span> ${esc(it.name)}${it.dir ? "/" : ""}</td>
+        <td><div class="pb"><div style="width:${pct}%"></div></div></td><td>${pct.toFixed(2)} %</td><td>${human(it.size)}</td><td>${it.files}</td>
+        <td>${fmtDate(it.created)}</td><td>${fmtDate(it.modified)}</td></tr>`; }).join("")
+    + (l.truncated ? `<tr><td colspan="7" class="mut">… liste tronquée aux 2000 plus gros éléments</td></tr>` : "");
+}
+$("fsList").addEventListener("click", e => {
+  if (e.target.dataset.k) { sortFs = e.target.dataset.k; return renderList(); }
+  const tr = e.target.closest("tr[data-name]"); if (!tr) return;
+  if (tr.classList.contains("dir")) openPath(joinPath(curPath, tr.dataset.name));
+  else { document.querySelectorAll("#fsList tr.sel").forEach(x => x.classList.remove("sel")); tr.classList.add("sel"); drawTreemap(joinPath(curPath, tr.dataset.name)); }
+});
+
+function renderExts(exts, total) {
+  $("fsExt").innerHTML = `<tr><th>Ext.</th><th></th><th>Taille</th><th>Fichiers</th></tr>` + exts.map(([e, s, c]) =>
+    `<tr><td>${e ? "." + esc(e) : "<i class=mut>aucune</i>"}</td><td><span class="sw" style="background:${extColor[e] || "#888"}"></span></td><td>${human(s)}</td><td>${c}</td></tr>`).join("");
+}
+
+// Treemap « squarified » (même principe que WinDirStat), un coussin coloré par fichier.
+function squarify(nodes, x, y, w, h, out) {
+  const total = nodes.reduce((s, n) => s + n[1], 0); if (total <= 0 || w < 1 || h < 1) return;
+  const scale = w * h / total; let i = 0;
+  while (i < nodes.length && w >= 1 && h >= 1) {
+    const side = Math.min(w, h); let row = [], sum = 0, worst = Infinity;
+    while (i < nodes.length) {
+      const a = nodes[i][1] * scale, s2 = sum + a, mx = Math.max(row.length ? row[0][1] * scale : a, a), mn = a;
+      const wr = Math.max(side * side * mx / (s2 * s2), s2 * s2 / (side * side * mn));
+      if (wr > worst && row.length) break;
+      row.push(nodes[i]); sum = s2; worst = wr; i++;
+    }
+    const thick = sum / side; let off = 0;
+    for (const n of row) { const len = n[1] * scale / thick;
+      if (w >= h) out.push([n, x, y + off, thick, len]); else out.push([n, x + off, y, len, thick]); off += len; }
+    if (w >= h) { x += thick; w -= thick; } else { y += thick; h -= thick; }
+  }
+}
+
+function drawTreemap(highlight) {
+  const cv = $("treemap"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!tmTree || !W) return;
+  cv.width = W * dpr; cv.height = H * dpr; const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H); tmRects = [];
+  const walk = (node, path, x, y, w, h) => {
+    const kids = node[2]; if (!Array.isArray(kids)) return;
+    const out = []; squarify(kids.filter(k => k[1] > 0), x, y, w, h, out);
+    for (const [n, rx, ry, rw, rh] of out) {
+      const p = joinPath(path, n[0]);
+      if (Array.isArray(n[2])) { if (rw >= 2 && rh >= 2) walk(n, p, rx, ry, rw, rh); continue; }
+      const col = extColor[n[2]] || "#8a8a8a";
+      const g = ctx.createRadialGradient(rx + rw * .4, ry + rh * .35, 0, rx + rw / 2, ry + rh / 2, Math.max(rw, rh) * .75);
+      g.addColorStop(0, "#fff"); g.addColorStop(.18, col); g.addColorStop(1, "#000");
+      ctx.fillStyle = g; ctx.fillRect(rx, ry, rw, rh);
+      tmRects.push([rx, ry, rw, rh, p, n[1], path]);
+      if (highlight === p) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2); }
+    }
+  };
+  walk(tmTree, curPath, 0, 0, W, H);
+}
+const hit = e => { const r = $("treemap").getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  return tmRects.find(([rx, ry, rw, rh]) => x >= rx && x < rx + rw && y >= ry && y < ry + rh); };
+$("treemap").addEventListener("mousemove", e => { const h = hit(e); if (h) $("tmInfo").textContent = `${h[4]} — ${human(h[5])}`; });
+$("treemap").addEventListener("click", e => { const h = hit(e); if (h) drawTreemap(h[4]); });
+$("treemap").addEventListener("dblclick", e => { const h = hit(e); if (h && h[6] !== curPath) openPath(h[6]); });
+window.addEventListener("resize", () => { if (!$("files").hidden) drawTreemap(); });
+
+$("go").addEventListener("click", () => openPath($("fsPath").value));
+$("fsPath").addEventListener("keydown", e => { if (e.key === "Enter") openPath($("fsPath").value); });
+$("up").addEventListener("click", () => openPath(curPath.replace(/\/[^/]+\/?$/, "") || "/"));
+$("scan").addEventListener("click", () => startScan("/"));
+
+let scanTimer = null;
+async function startScan(root) {
+  await api("api/fs/scan?path=" + encodeURIComponent(root)).catch(e => $("scanStatus").textContent = "Erreur : " + e.message);
+  clearInterval(scanTimer); scanTimer = setInterval(pollScan, 1000); pollScan();
+}
+async function pollScan() {
+  const s = await api("api/fs/status");
+  if (s.running) { $("scanStatus").textContent = `Analyse de ${s.scanning} : ${s.files.toLocaleString()} fichiers, ${human(s.bytes)}…`; return; }
+  clearInterval(scanTimer);
+  $("scanStatus").textContent = s.error ? "Erreur : " + s.error : `Analysé ${s.root} le ${fmtDate(s.finished)}`;
+  if (!s.error) openPath(curPath);
+}
+api("api/fs/status").then(s => { if (s.running) { scanTimer = setInterval(pollScan, 1000); } else if (s.finished) $("scanStatus").textContent = `Analysé ${s.root} le ${fmtDate(s.finished)}`; }).catch(() => {});
 
 const safe = f => () => f().catch(err => console.error(err));
 safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)();

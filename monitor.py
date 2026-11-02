@@ -15,8 +15,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import psutil
+
+import fsscan
 
 HERE = Path(__file__).resolve().parent
 # Réglages : config.ini à côté du script (voir config.example.ini), surchargeables par variables d'environnement.
@@ -264,7 +267,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/battery-history":
             m = re.search(r"hours=(\d+)", query)
             return self.send(200, battery_history(min(int(m.group(1)) if m else 24, 24 * RETENTION_DAYS)))
+        if path.startswith("/api/fs/"):
+            return self.fs(path[8:], parse_qs(query).get("path", ["/"])[0])
         self.send(404, {"error": "not found"})
+
+    def fs(self, action, target):
+        if action == "scan":
+            try:
+                return self.send(200, fsscan.start_scan(target))
+            except ValueError as e:
+                return self.send(400, {"error": str(e)})
+        if action == "status":
+            return self.send(200, fsscan.status())
+        handler = {"list": fsscan.listing, "treemap": fsscan.treemap, "extensions": fsscan.extensions}.get(action)
+        if not handler:
+            return self.send(404, {"error": "not found"})
+        result = handler(target)
+        if result is None:
+            return self.send(409, {"error": "chemin hors du dernier scan"})
+        self.send(200, result)
 
 
 def main():

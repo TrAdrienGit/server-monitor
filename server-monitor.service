@@ -14,7 +14,8 @@ User=root
 Nice=10
 ProtectSystem=strict
 ReadWritePaths=/var/lib/server-monitor
-ProtectHome=true
+# Lecture seule partout (y compris /home) pour le navigateur de fichiers.
+ProtectHome=read-only
 NoNewPrivileges=true
 
 [Install]

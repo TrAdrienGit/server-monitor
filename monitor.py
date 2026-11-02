@@ -255,6 +255,8 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/":
             return self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if path in ("/favicon.svg", "/favicon.ico"):
+            return self.send(200, (HERE / "favicon.svg").read_bytes(), "image/svg+xml")
         if path == "/api/stats":
             return self.send(200, stats())
         if path == "/api/errors":

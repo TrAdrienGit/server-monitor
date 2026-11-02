@@ -291,6 +291,7 @@ def errors():
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS battery (ts INTEGER PRIMARY KEY, percent REAL, watts REAL, status TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS temps (ts INTEGER PRIMARY KEY, avg REAL, max REAL)")
     return conn
 
 
@@ -306,7 +307,23 @@ def sampler():
                     conn.execute("DELETE FROM battery WHERE ts < ?", (int(time.time()) - RETENTION_DAYS * 86400,))
             except sqlite3.Error as e:
                 print("battery history:", e, flush=True)
+        readings = [t["c"] for t in temperatures()] + [g["temp_c"] for g in gpus() if g["temp_c"] is not None]
+        if readings:
+            try:
+                with db() as conn:
+                    conn.execute("INSERT OR REPLACE INTO temps VALUES (?,?,?)",
+                                 (int(time.time()), round(sum(readings) / len(readings), 1), max(readings)))
+                    conn.execute("DELETE FROM temps WHERE ts < ?", (int(time.time()) - RETENTION_DAYS * 86400,))
+            except sqlite3.Error as e:
+                print("temperature history:", e, flush=True)
         time.sleep(SAMPLE_SECONDS)
+
+
+def temp_history(hours):
+    with db() as conn:
+        rows = conn.execute("SELECT ts, avg, max FROM temps WHERE ts >= ? ORDER BY ts",
+                            (int(time.time() - hours * 3600),)).fetchall()
+    return [{"ts": r[0], "avg": r[1], "max": r[2]} for r in rows]
 
 
 def battery_history(hours):
@@ -370,6 +387,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, stats())
         if path == "/api/errors":
             return self.send(200, errors())
+        if path == "/api/temp-history":
+            m = re.search(r"hours=(\d+)", query)
+            return self.send(200, temp_history(min(int(m.group(1)) if m else 24, 24 * RETENTION_DAYS)))
         if path == "/api/battery-history":
             m = re.search(r"hours=(\d+)", query)
             return self.send(200, battery_history(min(int(m.group(1)) if m else 24, 24 * RETENTION_DAYS)))

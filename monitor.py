@@ -43,21 +43,34 @@ ALLOWED_NETS = [ipaddress.ip_network(n) for n in
 COMFY_USER = setting("comfyui_user", "")
 COMFY_UNIT = setting("comfyui_unit", "comfyui.service")
 COMFY_PORT = int(setting("comfyui_port", "8188"))
+MINECRAFT_USER = setting("minecraft_user", "")
+MINECRAFT_UNIT = setting("minecraft_unit", "minecraft.service")
+MINECRAFT_PORT = int(setting("minecraft_port", "25565"))
 
 
-def comfyui(action):
-    """État / démarrage / arrêt de la seule unité utilisateur ComfyUI. Aucune autre unité ni action n'est accessible."""
+def user_unit(user, unit, action):
+    """État / démarrage / arrêt d'une unité systemd utilisateur. Seules les unités fixées par la configuration y passent."""
     if action not in ("is-active", "start", "stop"):
         raise ValueError(action)
     import pwd
     try:
-        uid = pwd.getpwnam(COMFY_USER).pw_uid
+        uid = pwd.getpwnam(user).pw_uid
     except KeyError:
         return "indisponible"
-    cmd = ["runuser", "-u", COMFY_USER, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-           "systemctl", "--user"] + (["--no-block"] if action == "start" else []) + [action, COMFY_UNIT]
+    cmd = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+           "systemctl", "--user"] + (["--no-block"] if action in ("start", "stop") else []) + [action, unit]
     out = run(cmd, timeout=30).strip()
-    return out if action == "is-active" else comfyui("is-active")
+    return out if action == "is-active" else user_unit(user, unit, "is-active")
+
+
+def comfyui(action):
+    """La seule unité utilisateur ComfyUI."""
+    return user_unit(COMFY_USER, COMFY_UNIT, action)
+
+
+def minecraft(action):
+    """La seule unité utilisateur du serveur Minecraft (arrêt : le monde est sauvegardé, d'où --no-block)."""
+    return user_unit(MINECRAFT_USER, MINECRAFT_UNIT, action)
 
 
 def service_catalog():
@@ -366,6 +379,9 @@ class Handler(BaseHTTPRequestHandler):
             if not service_action(path.rsplit("/", 1)[1], parse_qs(query).get("unit", [""])[0]):
                 return self.send(403, {"error": "unité ou action non autorisée"})
             return self.send(200, {"ok": True})
+        action = {"/api/minecraft/start": "start", "/api/minecraft/stop": "stop"}.get(path)
+        if action:
+            return self.send(200, {"state": minecraft(action), "port": MINECRAFT_PORT})
         action = {"/api/comfyui/start": "start", "/api/comfyui/stop": "stop"}.get(path)
         if not action:
             return self.send(404, {"error": "not found"})
@@ -379,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, services())
         if path == "/api/comfyui":
             return self.send(200, {"state": comfyui("is-active"), "port": COMFY_PORT})
+        if path == "/api/minecraft":
+            return self.send(200, {"state": minecraft("is-active"), "port": MINECRAFT_PORT})
         if path == "/":
             return self.send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
         if path in ("/favicon.svg", "/favicon.ico"):

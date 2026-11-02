@@ -85,6 +85,11 @@
     <div class="big" id="cuState">–</div>
     <div style="margin:8px 0"><button id="cuBtn" disabled>…</button> <a id="cuLink" href="#" target="_blank" rel="noopener" hidden>Ouvrir ComfyUI ↗</a></div>
     <div class="mut" id="cuNote">ComfyUI libère la VRAM d'Ollama à son démarrage : PdC sera plus lent tant qu'il tourne.</div></div>
+  <div class="card"><h2>Serveur Minecraft</h2>
+    <div class="big" id="mcState">–</div>
+    <div style="margin:8px 0"><button id="mcBtn" disabled>…</button></div>
+    <div class="mut" id="mcAddr"></div>
+    <div class="mut">Cobblemon Academy, 4 Go de RAM au plus ; environ 1 minute pour démarrer. L'arrêt sauvegarde le monde.</div></div>
   <div class="card"><h2>Disques</h2><div id="disks"></div></div>
   <div class="card"><h2>Températures</h2><table id="temps"></table></div>
   <div class="card wide"><h2>Historique batterie
@@ -346,6 +351,27 @@ function renderComfy(c) {
   $("cuLink").href = `http://${location.hostname}:${c.port}/`;
 }
 async function refreshComfy() { renderComfy(await (await fetch("api/comfyui")).json()); }
+
+// ---------- Serveur Minecraft ----------
+let mcState = null;
+function renderMinecraft(c) {
+  mcState = c.state;
+  const on = c.state === "active" || c.state === "activating";
+  $("mcState").textContent = CU_LABEL[c.state] || c.state;
+  $("mcState").className = "big " + (c.state === "active" ? "ok" : c.state === "failed" ? "bad" : "");
+  $("mcBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("mcBtn").disabled = c.state === "indisponible" || c.state === "deactivating";
+  $("mcAddr").textContent = `Adresse : ${location.hostname}:${c.port}`;
+}
+async function refreshMinecraft() { renderMinecraft(await (await fetch("api/minecraft")).json()); }
+$("mcBtn").addEventListener("click", async () => {
+  const on = mcState === "active" || mcState === "activating";
+  if (on && !confirm("Éteindre le serveur Minecraft ? Les joueurs connectés seront déconnectés (le monde est sauvegardé).")) return;
+  $("mcBtn").disabled = true;
+  const r = await fetch("api/minecraft/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderMinecraft(await r.json());
+  setTimeout(() => refreshMinecraft().catch(() => {}), 3000);
+});
 $("cuBtn").addEventListener("click", async () => {
   const on = cuState === "active" || cuState === "activating";
   if (!on && !confirm("Allumer ComfyUI ? Il décharge les modèles Ollama de la VRAM (PdC sera plus lent).")) return;
@@ -357,6 +383,7 @@ $("cuBtn").addEventListener("click", async () => {
 
 const safe = f => () => f().catch(err => console.error(err));
 safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)(); safe(refreshComfy)(); setInterval(safe(refreshComfy), 5000);
+safe(refreshMinecraft)(); setInterval(safe(refreshMinecraft), 5000);
 setInterval(safe(refreshStats), 3000); setInterval(safe(refreshChart), 60000); setInterval(safe(refreshErrors), 60000);
 </script>
 </body>

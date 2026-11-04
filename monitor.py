@@ -382,6 +382,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-Monitor-Action") != "1":
             return self.send(400, {"error": "en-tête manquant"})
         path, _, query = self.path.partition("?")
+        if path in ("/api/power/poweroff", "/api/power/reboot"):
+            action = path.rsplit("/", 1)[1]
+            if parse_qs(query).get("confirm", [""])[0] != action:
+                return self.send(400, {"error": "confirmation manquante"})
+            self.send(200, {"ok": True, "action": action})
+            # Léger délai pour laisser partir la réponse HTTP avant l'arrêt des services.
+            threading.Timer(2, lambda: subprocess.run(["systemctl", action], timeout=30)).start()
+            return
         if path in ("/api/services/start", "/api/services/restart"):
             if not service_action(path.rsplit("/", 1)[1], parse_qs(query).get("unit", [""])[0]):
                 return self.send(403, {"error": "unité ou action non autorisée"})

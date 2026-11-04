@@ -4,6 +4,7 @@
 Dépendance unique : psutil. Tout le reste est la bibliothèque standard.
 """
 import configparser
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
@@ -301,11 +302,17 @@ def errors():
 
 # ---------- Historique batterie (SQLite) ----------
 
+@contextmanager
 def db():
+    """Connexion SQLite validée (commit) puis toujours refermée : `with sqlite3.connect()` seul ne ferme pas."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("CREATE TABLE IF NOT EXISTS battery (ts INTEGER PRIMARY KEY, percent REAL, watts REAL, status TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS temps (ts INTEGER PRIMARY KEY, avg REAL, max REAL)")
-    return conn
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS battery (ts INTEGER PRIMARY KEY, percent REAL, watts REAL, status TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS temps (ts INTEGER PRIMARY KEY, avg REAL, max REAL)")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def sampler():

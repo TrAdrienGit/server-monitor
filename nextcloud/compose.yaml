@@ -1,0 +1,84 @@
+name: nextcloud
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
+x-nextcloud-env: &nextcloud-env
+  POSTGRES_HOST: db
+  POSTGRES_DB: nextcloud
+  POSTGRES_USER: nextcloud
+  POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+  REDIS_HOST: redis
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  admin_password:
+    file: ./secrets/admin_password
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nextcloud -d nextcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *logging
+
+  app:
+    image: nextcloud:stable-apache
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    # Uniquement en local : seul « tailscale serve » y accède.
+    ports:
+      - "127.0.0.1:8090:80"
+    secrets: [db_password, admin_password]
+    environment:
+      <<: *nextcloud-env
+      NEXTCLOUD_ADMIN_USER: adrien
+      NEXTCLOUD_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      NEXTCLOUD_TRUSTED_DOMAINS: server-linux.tail192969.ts.net:8443
+      OVERWRITEHOST: server-linux.tail192969.ts.net:8443
+      OVERWRITEPROTOCOL: https
+      OVERWRITECLIURL: https://server-linux.tail192969.ts.net:8443
+      TRUSTED_PROXIES: 172.16.0.0/12
+      PHP_UPLOAD_LIMIT: 16G
+      PHP_MEMORY_LIMIT: 1G
+    volumes:
+      - ./html:/var/www/html
+      - ./data:/var/www/html/data
+
+  cron:
+    image: nextcloud:stable-apache
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      - app
+    entrypoint: /cron.sh
+    secrets: [db_password]
+    environment: *nextcloud-env
+    volumes:
+      - ./html:/var/www/html
+      - ./data:/var/www/html/data

@@ -1,0 +1,11 @@
+[Unit]
+Description=Rallumage automatique : initialisation au demarrage
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/server-autowake boot
+
+[Install]
+WantedBy=multi-user.target

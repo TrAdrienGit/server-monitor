@@ -90,11 +90,26 @@
     <div style="margin:8px 0"><button id="mcBtn" disabled>…</button></div>
     <div class="mut" id="mcAddr"></div>
     <div class="mut">Cobblemon Academy, 4 Go de RAM au plus ; environ 1 minute pour démarrer. L'arrêt sauvegarde le monde.</div></div>
+  <div class="card"><h2>Cloud</h2>
+    <div class="big" id="clState">–</div>
+    <div style="margin:8px 0"><button id="clBtn" disabled>…</button> <a id="clLink" href="#" target="_blank" rel="noopener" hidden>Ouvrir Nextcloud ↗</a></div>
+    <div id="clUsed">–</div><div class="bar"><div id="clBar"></div></div>
+    <div class="mut" id="clMeta"></div></div>
+  <div class="card"><h2>Partage de fichiers</h2>
+    <div class="big" id="shState">–</div>
+    <div style="margin:8px 0"><button id="shBtn" disabled>…</button> <a id="shLink" href="#" target="_blank" rel="noopener" hidden>Ouvrir l'administration ↗</a></div>
+    <div id="shUsed">–</div>
+    <div class="mut" id="shMeta"></div>
+    <div class="mut">Les fichiers se déposent dans Nextcloud, dossier Public. Dans les liens envoyés, remplacer :9443 par :10000.</div></div>
   <div class="card"><h2>Alimentation</h2>
     <div><button id="pwReboot">Redémarrer</button> <button id="pwOff" style="background:var(--bad)">Éteindre</button></div>
-    <div class="mut" style="margin-top:8px" id="pwNote">Éteindre coupe tous les services (PdC, Phantasmon…). Pour rallumer : Wake-on-LAN depuis le PC (script wake-server).</div></div>
+    <div class="mut" style="margin-top:8px" id="pwNote">Éteindre coupe tous les services (PdC, Phantasmon…) et annule le rallumage automatique. Pour rallumer : Wake-on-LAN depuis le réseau local (script wake-server).</div></div>
   <div class="card"><h2>Disques</h2><div id="disks"></div></div>
   <div class="card"><h2>Températures</h2><table id="temps"></table></div>
+  <div class="card wide"><h2>Rallumage automatique</h2>
+    <div class="big" id="awState">–</div>
+    <div class="mut" id="awNote" style="margin-bottom:8px"></div>
+    <div id="awGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px"></div></div>
   <div class="card wide"><h2>Historique batterie
     <select id="hours"><option value="6">6 h</option><option value="24" selected>24 h</option><option value="168">7 j</option><option value="720">30 j</option></select></h2>
     <svg id="chart" preserveAspectRatio="none"></svg></div>
@@ -350,6 +365,77 @@ async function power(action, word, label) {
 $("pwReboot").addEventListener("click", () => power("reboot", "REDEMARRER", "Redémarrer"));
 $("pwOff").addEventListener("click", () => power("poweroff", "ETEINDRE", "Éteindre"));
 
+// ---------- Rallumage automatique ----------
+const awDate = t => t ? new Date(t * 1000).toLocaleString() : "–";
+function awDuration(s) {
+  if (s == null) return "–";
+  s = Math.round(Math.abs(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
+  return h ? `${h} h ${String(m).padStart(2, "0")}` : m ? `${m} min ${String(r).padStart(2, "0")} s` : `${r} s`;
+}
+const awYes = (v, good) => `<span class="${v === good ? "ok" : "bad"}">${esc(v ?? "–")}</span>`;
+const awTable = (title, rows) => `<div><table><tr><th colspan="2">${esc(title)}</th></tr>${rows.map(([k, v]) => `<tr><td class="mut">${esc(k)}</td><td style="white-space:normal">${v}</td></tr>`).join("")}</table></div>`;
+const AW_PREVIOUS = {poweroff: ['<span class="ok">Extinction normale</span>'], reboot: ['<span class="ok">Redémarrage normal</span>'], unclean: ['<span class="bad">Arrêt brutal (journal interrompu)</span>']};
+async function refreshAutowake() {
+  const a = await (await fetch("api/autowake")).json();
+  if (!a.installed) { $("awState").textContent = "Non installé"; $("awState").className = "big bad"; $("awNote").textContent = ""; $("awGrid").innerHTML = ""; return; }
+  const left = a.alarm ? a.alarm - a.now : null;
+  const stale = left != null && left < a.current_delay - 600;
+  const armed = left > 0 && a.timer.active === "active" && !stale;
+  const backoff = a.current_delay !== a.config.delay;
+  $("awState").textContent = a.marker ? "Désactivé : extinction demandée" : !armed ? "Non armé" : backoff ? "Armé, délai allongé" : "Armé";
+  $("awState").className = "big " + (a.marker || backoff ? "warn" : armed ? "ok" : "bad");
+  $("awNote").textContent = armed ? `Si le serveur s'éteint maintenant, il se rallumera vers ${awDate(a.alarm)}.`
+    : a.marker ? "Le serveur restera éteint." : stale ? "L'alarme n'est plus repoussée : vérifier le timer." : "Aucune alarme valide : le serveur ne se rallumerait pas.";
+  const wd = a.watchdog;
+  const prev = a.previous || {};
+  $("awGrid").innerHTML = [
+    awTable("Alarme", [
+      ["Déclenchement", awDate(a.alarm)],
+      ["Dans", left != null ? awDuration(left) : "–"],
+      ["Délai actuel", awDuration(a.current_delay)],
+      ["Délai normal", awDuration(a.config.delay)],
+      ["Délai allongé", `${awDuration(a.config.backoff_delay)}, dès ${a.config.backoff_boots} démarrages en ${awDuration(a.config.backoff_window)}`],
+      ["Horloge", `${esc(a.rtc.name)}, écart ${a.rtc.drift_s != null ? a.rtc.drift_s.toFixed(0) + " s" : "–"}`],
+    ]),
+    awTable("Report de l'alarme", [
+      ["Timer", `${awYes(a.timer.active, "active")}, ${awYes(a.timer.enabled, "enabled")}`],
+      ["Dernier report", awDate(a.timer.last)],
+      ["Prochain report", awDate(a.timer.next)],
+      ["Résultat", `${awYes(a.timer.result, "success")} (code ${esc(a.timer.status)})`],
+      ["Service de démarrage", `${awYes(a.boot_unit.active, "active")}, ${awYes(a.boot_unit.enabled, "enabled")}, ${awYes(a.boot_unit.result, "success")}`],
+    ]),
+    awTable("Démarrages", [
+      ["Démarrage actuel", awDate(a.boot_time)],
+      ["Sur 6 h", `${a.recent_boots} / ${a.config.backoff_boots}`],
+      ["Arrêt précédent", (AW_PREVIOUS[prev.kind] || ["Inconnu"])[0]],
+      ["Fin du journal précédent", awDate(prev.last_entry)],
+      ["Temps éteint", prev.last_entry && a.boot_time ? awDuration(a.boot_time - prev.last_entry) : "–"],
+      ["Traces de crash (pstore)", a.pstore.length ? `<span class="warn">${esc(a.pstore.join(", "))}</span>` : "aucune"],
+      ["Derniers démarrages", a.boots.slice().reverse().map(awDate).map(esc).join("<br>") || "–"],
+    ]),
+    awTable("Watchdog matériel", wd ? [
+      ["Pilote", esc(wd.identity)],
+      ["Périphérique", esc(wd.device)],
+      ["État", awYes(wd.state, "active")],
+      ["Délai", `${esc(wd.timeout)} s${wd.timeleft ? `, reste ${esc(wd.timeleft)} s` : ""}`],
+      ["Délai systemd", esc(wd.runtime)],
+      ["Dernier signal", awDate(wd.last_ping)],
+      ["Dernier reset par le watchdog", wd.bootstatus && wd.bootstatus !== "0" ? `<span class="warn">oui (${esc(wd.bootstatus)})</span>` : "non"],
+    ] : [["État", '<span class="bad">absent</span>']]),
+    awTable("Plantages et alimentation", [
+      ["Redémarrage après panic", a.kernel.panic > 0 ? `<span class="ok">${esc(a.kernel.panic)} s</span>` : '<span class="bad">désactivé</span>'],
+      ["Panic sur soft lockup", awYes(a.kernel.softlockup_panic, "1")],
+      ["Panic sur hard lockup", awYes(a.kernel.hardlockup_panic, "1")],
+      ["NMI watchdog", awYes(a.kernel.nmi_watchdog, "1")],
+      ["Secteur", a.ac_online === "1" ? '<span class="ok">branché</span>' : '<span class="bad">débranché</span>'],
+      ["Batterie", a.battery != null ? esc(a.battery) + " %" : "–"],
+      ["Wake-on-LAN enp3s0", awYes(a.wol, "g")],
+      ["Seuils critiques", a.critical_temps.map(t => `${esc(t.zone)} ${t.celsius.toFixed(0)} °C`).join("<br>") || "–"],
+    ]),
+  ].join("");
+}
+
 // ---------- ComfyUI (génération d'images) ----------
 let cuState = null;
 const CU_LABEL = {active: "Allumé", inactive: "Éteint", activating: "Démarrage…", deactivating: "Arrêt…", failed: "En erreur", indisponible: "Indisponible"};
@@ -385,6 +471,55 @@ $("mcBtn").addEventListener("click", async () => {
   renderMinecraft(await r.json());
   setTimeout(() => refreshMinecraft().catch(() => {}), 3000);
 });
+// ---------- Partage de fichiers ----------
+let shState = null;
+function renderShare(c) {
+  shState = c.state;
+  const on = c.state === "active" || c.state === "activating";
+  $("shState").textContent = {active: "En ligne", inactive: "Hors ligne"}[c.state] || CU_LABEL[c.state] || c.state;
+  $("shState").className = "big " + (c.state === "active" ? "ok" : "");
+  $("shBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("shBtn").disabled = c.state === "deactivating";
+  $("shLink").hidden = !c.online;
+  $("shLink").href = c.admin_url;
+  $("shUsed").textContent = c.size == null ? "Public : –" : `Public : ${gb(c.size)}`;
+  const up = c.containers.filter(x => x.state === "running").length;
+  $("shMeta").textContent = [c.folders != null ? `${c.folders} dossier(s)` : "", `${up}/${c.containers.length} conteneur actif`, `Liens publics sur le port 10000`].filter(Boolean).join(" · ");
+}
+async function refreshShare() { renderShare(await (await fetch("api/share")).json()); }
+$("shBtn").addEventListener("click", async () => {
+  const on = shState !== "inactive";
+  if (on && !confirm("Éteindre le partage ? Tous les liens envoyés cesseront de répondre, même après un redémarrage du serveur, jusqu'à ce que tu le rallumes.")) return;
+  $("shBtn").disabled = true;
+  const r = await fetch("api/share/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderShare(await r.json());
+});
+
+// ---------- Cloud (Nextcloud) ----------
+let clState = null;
+function renderCloud(c) {
+  clState = c.state;
+  const on = c.state === "active" || c.state === "activating" || c.state === "failed";
+  $("clState").textContent = {active: "En ligne", inactive: "Hors ligne", failed: "Partiellement arrêté"}[c.state] || CU_LABEL[c.state] || c.state;
+  $("clState").className = "big " + (c.state === "active" ? "ok" : c.state === "failed" ? "bad" : "");
+  $("clBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("clBtn").disabled = c.state === "deactivating";
+  $("clLink").hidden = !c.online;
+  $("clLink").href = c.url;
+  $("clUsed").textContent = c.files == null ? "Espace : –" : c.quota ? `${gb(c.files)} / ${gb(c.quota)}` : `${gb(c.files)}, quota inconnu`;
+  bar("clBar", c.quota && c.files != null ? c.files / c.quota * 100 : 0);
+  const up = c.containers.filter(x => x.state === "running").length;
+  $("clMeta").textContent = [c.total != null ? `${gb(c.total)} sur le disque au total` : "", c.disk_free != null ? `${gb(c.disk_free)} libres sur /data` : "",
+    `${up}/${c.containers.length} conteneurs actifs`, c.version ? `Nextcloud ${c.version}` : ""].filter(Boolean).join(" · ");
+}
+async function refreshCloud() { renderCloud(await (await fetch("api/cloud")).json()); }
+$("clBtn").addEventListener("click", async () => {
+  const on = clState !== "inactive";
+  if (on && !confirm("Éteindre le cloud ? Il restera éteint, même après un redémarrage du serveur, et les envois du téléphone attendront.")) return;
+  $("clBtn").disabled = true;
+  const r = await fetch("api/cloud/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderCloud(await r.json());
+});
 $("cuBtn").addEventListener("click", async () => {
   const on = cuState === "active" || cuState === "activating";
   if (!on && !confirm("Allumer ComfyUI ? Il décharge les modèles Ollama de la VRAM (PdC sera plus lent).")) return;
@@ -397,6 +532,9 @@ $("cuBtn").addEventListener("click", async () => {
 const safe = f => () => f().catch(err => console.error(err));
 safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)(); safe(refreshComfy)(); setInterval(safe(refreshComfy), 5000);
 safe(refreshMinecraft)(); setInterval(safe(refreshMinecraft), 5000);
+safe(refreshAutowake)(); setInterval(safe(refreshAutowake), 10000);
+safe(refreshCloud)(); setInterval(safe(refreshCloud), 5000);
+safe(refreshShare)(); setInterval(safe(refreshShare), 5000);
 setInterval(safe(refreshStats), 3000); setInterval(safe(refreshChart), 60000); setInterval(safe(refreshErrors), 60000);
 </script>
 </body>

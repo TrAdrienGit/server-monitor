@@ -1,0 +1,83 @@
+#!/bin/bash
+# Rallumage automatique : tant que le serveur tourne, l'alarme de l'horloge matérielle est
+# repoussée. S'il s'éteint sans passer par une extinction volontaire, elle le rallume.
+set -u
+
+ALARM=/sys/class/rtc/rtc0/wakealarm
+MARKER=/var/lib/server-monitor/poweroff-requested   # écrit aussi par monitor.py
+BOOTS=/var/lib/server-autowake/boots
+DELAY=1800            # 30 min : laisse la machine refroidir
+BACKOFF_DELAY=21600   # 6 h : si les redémarrages s'enchaînent
+BACKOFF_BOOTS=4       # à partir de ce nombre de démarrages...
+BACKOFF_WINDOW=21600  # ... sur cette durée (6 h)
+
+clear_alarm() { echo 0 > "$ALARM"; }
+
+recent_boots() {
+    local since=$(( $(date +%s) - BACKOFF_WINDOW ))
+    [ -f "$BOOTS" ] || { echo 0; return; }
+    awk -v s="$since" '$1 >= s { n++ } END { print n + 0 }' "$BOOTS"
+}
+
+current_delay() {
+    if [ "$(recent_boots)" -ge "$BACKOFF_BOOTS" ]; then echo "$BACKOFF_DELAY"; else echo "$DELAY"; fi
+}
+
+arm() {
+    if [ -e "$MARKER" ]; then clear_alarm; return; fi
+    clear_alarm                       # le noyau refuse une nouvelle alarme si une autre est active
+    echo "+$(current_delay)" > "$ALARM"
+    # Une extinction volontaire a pu être demandée pendant l'écriture.
+    if [ -e "$MARKER" ]; then clear_alarm; fi
+}
+
+case "${1:-}" in
+    boot)
+        rm -f "$MARKER"
+        mkdir -p "$(dirname "$BOOTS")" "$(dirname "$MARKER")"
+        date +%s >> "$BOOTS"
+        tail -n 100 "$BOOTS" > "$BOOTS.tmp" && mv "$BOOTS.tmp" "$BOOTS"
+        arm
+        # Le pilote est sur la liste noire d'Ubuntu : seul un chargement explicite passe.
+        # systemd n'ouvre le watchdog qu'à son lancement, d'où le daemon-reexec.
+        if modprobe iTCO_wdt 2>/dev/null && [ -e /dev/watchdog0 ]; then
+            systemctl daemon-reexec
+        fi
+        ;;
+    arm)
+        arm
+        ;;
+    off)
+        # Extinction volontaire, à utiliser à la place de « systemctl poweroff ».
+        touch "$MARKER"
+        clear_alarm
+        systemctl poweroff || { rm -f "$MARKER"; arm; exit 1; }
+        ;;
+    config)
+        # Lu par monitor.py : ces réglages n'existent qu'ici.
+        echo "delay=$DELAY"
+        echo "backoff_delay=$BACKOFF_DELAY"
+        echo "backoff_boots=$BACKOFF_BOOTS"
+        echo "backoff_window=$BACKOFF_WINDOW"
+        ;;
+    status)
+        now=$(date +%s)
+        at=$(cat "$ALARM")
+        if [ -n "$at" ]; then
+            echo "alarme : dans $(( at - now )) s ($(date -d "@$at"))"
+        else
+            echo "alarme : aucune"
+        fi
+        echo "demarrages sur 6 h : $(recent_boots) (delai actuel : $(current_delay) s)"
+        echo "kernel.panic : $(sysctl -n kernel.panic)"
+        if [ -e /dev/watchdog0 ]; then
+            echo "watchdog : /dev/watchdog0 present, $(systemctl show -p RuntimeWatchdogUSec)"
+        else
+            echo "watchdog : absent"
+        fi
+        ;;
+    *)
+        echo "usage : server-autowake boot|arm|off|config|status" >&2
+        exit 2
+        ;;
+esac

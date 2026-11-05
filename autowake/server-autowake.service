@@ -1,0 +1,7 @@
+[Unit]
+Description=Rallumage automatique : repousse l'alarme de l'horloge materielle
+After=server-autowake-boot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-autowake arm

@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -355,6 +356,256 @@ def battery_history(hours):
 
 # ---------- HTTP ----------
 
+POWEROFF_MARKER = Path("/var/lib/server-monitor/poweroff-requested")
+WAKE_ALARM = Path("/sys/class/rtc/rtc0/wakealarm")
+
+
+def power_action(action):
+    """Éteint ou redémarre ; une extinction volontaire annule d'abord le rallumage automatique."""
+    if action != "poweroff":
+        subprocess.run(["systemctl", action], timeout=30)
+        return
+    POWEROFF_MARKER.touch()
+    try:
+        WAKE_ALARM.write_text("0")
+    except OSError:
+        pass
+    try:
+        ok = subprocess.run(["systemctl", "poweroff"], timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:
+        # Le serveur reste allumé : le timer doit pouvoir réarmer l'alarme.
+        POWEROFF_MARKER.unlink(missing_ok=True)
+
+
+CLOUD_DIR = Path("/data/nextcloud")
+CLOUD_USER = "adrien"
+CLOUD_LOCAL_URL = "http://127.0.0.1:8090/status.php"
+CLOUD_URL = "https://server-linux.tail192969.ts.net:8443"
+SHARE_DIR = Path("/data/public-share")
+SHARE_LOCAL_URL = "http://127.0.0.1:8091/"
+SHARE_ADMIN_URL = "https://server-linux.tail192969.ts.net:9443"
+SHARE_PUBLIC_URL = "https://server-linux.tail192969.ts.net:10000"
+_stack_lock = threading.Lock()
+_stack_busy = {}        # dossier compose -> "activating" ou "deactivating" pendant une commande
+_cloud_sizes = {"at": 0}
+_share_sizes = {"at": 0}
+
+
+def compose(folder, *args, timeout=15):
+    return run(["docker", "compose", "-f", str(folder / "compose.yaml"), *args], timeout=timeout)
+
+
+def cloud_compose(*args, timeout=15):
+    return compose(CLOUD_DIR, *args, timeout=timeout)
+
+
+def stack_power(folder, action):
+    """Allume ou éteint les conteneurs ; « stop » les laisse éteints même après un redémarrage."""
+    with _stack_lock:
+        if _stack_busy.get(folder):
+            return
+        _stack_busy[folder] = "activating" if action == "start" else "deactivating"
+
+    def work():
+        try:
+            compose(folder, *(("up", "-d") if action == "start" else ("stop",)), timeout=180)
+        finally:
+            _stack_busy[folder] = None
+    threading.Thread(target=work, daemon=True).start()
+
+
+def stack_containers(folder):
+    containers = []
+    for line in compose(folder, "ps", "-a", "--format", "json").splitlines():
+        try:
+            c = json.loads(line)
+            containers.append({"service": c.get("Service"), "state": c.get("State")})
+        except ValueError:
+            pass
+    return containers
+
+
+def share_info():
+    containers = stack_containers(SHARE_DIR)
+    try:
+        with urllib.request.urlopen(SHARE_LOCAL_URL, timeout=3) as r:
+            online = r.status == 200
+    except (OSError, ValueError):
+        online = False
+    running = sum(c["state"] == "running" for c in containers)
+    state = _stack_busy.get(SHARE_DIR) or ("active" if online else "activating" if running else "inactive")
+    if time.time() - _share_sizes["at"] > 60:
+        public = CLOUD_DIR / "data" / CLOUD_USER / "files" / "Public"
+        folders = sum(p.is_dir() for p in public.iterdir()) if public.is_dir() else None
+        _share_sizes.update(at=time.time(), size=dir_size(public), folders=folders)
+    return {"state": state, "online": online, "admin_url": SHARE_ADMIN_URL, "public_url": SHARE_PUBLIC_URL,
+            "containers": containers, "size": _share_sizes.get("size"), "folders": _share_sizes.get("folders")}
+
+
+def dir_size(path):
+    try:
+        return int(run(["du", "-sb", str(path)], timeout=30).split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def cloud_sizes(online):
+    """Mesures coûteuses, rafraîchies au plus une fois par minute."""
+    if time.time() - _cloud_sizes["at"] > 60:
+        _cloud_sizes.update(at=time.time(), files=dir_size(CLOUD_DIR / "data" / CLOUD_USER / "files"), total=dir_size(CLOUD_DIR))
+        if online:
+            try:
+                info = json.loads(cloud_compose("exec", "-T", "-u", "www-data", "app", "php", "occ", "user:info", CLOUD_USER, "--output=json"))
+                match = re.fullmatch(r"([\d.]+)\s*GB", str(info.get("quota")))
+                _cloud_sizes["quota"] = int(float(match[1]) * 2**30) if match else None
+            except ValueError:
+                pass
+    return _cloud_sizes
+
+
+def cloud_info():
+    containers = stack_containers(CLOUD_DIR)
+    version = None
+    try:
+        with urllib.request.urlopen(CLOUD_LOCAL_URL, timeout=3) as r:
+            status = json.load(r)
+        online = status.get("installed") is True and not status.get("maintenance")
+        version = status.get("versionstring")
+    except (OSError, ValueError):
+        online = False
+    running = sum(c["state"] == "running" for c in containers)
+    state = _stack_busy.get(CLOUD_DIR) or ("active" if online else "activating" if running == len(containers) and running else "failed" if running else "inactive")
+    sizes = cloud_sizes(online)
+    disk = shutil.disk_usage(CLOUD_DIR) if CLOUD_DIR.exists() else None
+    return {"state": state, "online": online, "version": version, "url": CLOUD_URL, "containers": containers,
+            "files": sizes.get("files"), "total": sizes.get("total"), "quota": sizes.get("quota"),
+            "disk_free": disk.free if disk else None}
+
+
+AUTOWAKE_BIN = "/usr/local/sbin/server-autowake"
+AUTOWAKE_BOOTS = Path("/var/lib/server-autowake/boots")
+_previous_shutdown = {}  # une seule analyse du journal par démarrage
+
+
+def unit_props(unit, *props):
+    out = run(["systemctl", "show", "--timestamp=unix", unit, *(f"-p{p}" for p in props)])
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def unix_ts(value):
+    """Convertit « @1793808335 » (systemctl --timestamp=unix) en nombre, sinon None."""
+    try:
+        return int(value.lstrip("@"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def previous_shutdown():
+    """Comment le démarrage précédent s'est terminé, d'après la fin de son journal."""
+    boot_id = read_sysfs("/proc/sys/kernel/random/boot_id")
+    if boot_id not in _previous_shutdown:
+        lines = run(["journalctl", "-b", "-1", "-n", "300", "-o", "short-unix", "--no-pager"], timeout=10).splitlines()
+        lines = [l for l in lines if l and not l.startswith("--")]
+        kind = None
+        if lines:
+            text = "\n".join(lines)
+            kind = ("poweroff" if "Power-Off" in text or "System Power Off" in text
+                    else "reboot" if "Reached target Reboot" in text or "System Reboot" in text
+                    else "unclean")
+        try:
+            last = float(lines[-1].split()[0]) if lines else None
+        except ValueError:
+            last = None
+        _previous_shutdown[boot_id] = {"kind": kind, "last_entry": last}
+    return _previous_shutdown[boot_id]
+
+
+def critical_temps():
+    temps = []
+    for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+        for trip in zone.glob("trip_point_*_type"):
+            if read_sysfs(trip) == "critical":
+                value = read_sysfs(str(trip).replace("_type", "_temp"))
+                if value and int(value) > 0:
+                    temps.append({"zone": read_sysfs(zone / "type"), "celsius": int(value) / 1000})
+    return temps
+
+
+def autowake_info():
+    """État du rallumage automatique (autowake/), pour la carte dédiée."""
+    now = time.time()
+    config = {}
+    for line in run([AUTOWAKE_BIN, "config"]).splitlines():
+        key, _, value = line.partition("=")
+        if value.isdigit():
+            config[key] = int(value)
+    if not config:
+        return {"installed": False}
+
+    boots = []
+    try:
+        boots = [int(x) for x in AUTOWAKE_BOOTS.read_text().split()]
+    except (OSError, ValueError):
+        pass
+    recent = sum(b >= now - config["backoff_window"] for b in boots)
+    alarm = read_sysfs(WAKE_ALARM)
+
+    timer = unit_props("server-autowake.timer", "ActiveState", "UnitFileState", "LastTriggerUSec")
+    # Timer monotone : sa prochaine échéance n'est donnée que par list-timers.
+    next_run = None
+    try:
+        listed = json.loads(run(["systemctl", "list-timers", "server-autowake.timer", "--output=json"]) or "[]")
+        next_run = listed[0]["next"] / 1e6 if listed and listed[0].get("next") else None
+    except (ValueError, KeyError, TypeError):
+        pass
+    arm = unit_props("server-autowake.service", "Result", "ExecMainStatus")
+    boot_unit = unit_props("server-autowake-boot.service", "ActiveState", "UnitFileState", "Result")
+    manager = dict(line.split("=", 1) for line in run(
+        ["systemctl", "show", "--timestamp=unix", "-pRuntimeWatchdogUSec", "-pWatchdogLastPingTimestamp", "-pWatchdogDevice"]).splitlines() if "=" in line)
+
+    wd = Path("/sys/class/watchdog/watchdog0")
+    watchdog = None
+    if wd.exists():
+        watchdog = {k: read_sysfs(wd / k) for k in ("identity", "timeout", "timeleft", "state", "status", "bootstatus", "nowayout")}
+        watchdog.update(runtime=manager.get("RuntimeWatchdogUSec"), device=manager.get("WatchdogDevice"),
+                        last_ping=unix_ts(manager.get("WatchdogLastPingTimestamp")))
+
+    wol = None
+    for line in run(["ethtool", "enp3s0"]).splitlines():
+        if line.strip().startswith("Wake-on:"):
+            wol = line.split(":", 1)[1].strip()
+
+    rtc_now = read_sysfs("/sys/class/rtc/rtc0/since_epoch")
+    uptime = read_sysfs("/proc/uptime")
+    pstore = Path("/sys/fs/pstore")
+    return {
+        "installed": True,
+        "now": now,
+        "alarm": int(alarm) if alarm else None,
+        "marker": POWEROFF_MARKER.exists(),
+        "config": config,
+        "boots": boots[-10:],
+        "recent_boots": recent,
+        "current_delay": config["backoff_delay"] if recent >= config["backoff_boots"] else config["delay"],
+        "timer": {"active": timer.get("ActiveState"), "enabled": timer.get("UnitFileState"),
+                  "last": unix_ts(timer.get("LastTriggerUSec")), "next": next_run,
+                  "result": arm.get("Result"), "status": arm.get("ExecMainStatus")},
+        "boot_unit": {"active": boot_unit.get("ActiveState"), "enabled": boot_unit.get("UnitFileState"), "result": boot_unit.get("Result")},
+        "kernel": {k: read_sysfs(f"/proc/sys/kernel/{k}") for k in ("panic", "softlockup_panic", "hardlockup_panic", "nmi_watchdog")},
+        "watchdog": watchdog,
+        "rtc": {"name": read_sysfs("/sys/class/rtc/rtc0/name"), "drift_s": int(rtc_now) - now if rtc_now else None},
+        "wol": wol,
+        "ac_online": read_sysfs("/sys/class/power_supply/ADP1/online"),
+        "battery": read_sysfs("/sys/class/power_supply/BAT1/capacity"),
+        "critical_temps": critical_temps(),
+        "boot_time": now - float(uptime.split()[0]) if uptime else None,
+        "previous": previous_shutdown(),
+        "pstore": sorted(p.name for p in pstore.iterdir()) if pstore.is_dir() else [],
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -388,12 +639,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "confirmation manquante"})
             self.send(200, {"ok": True, "action": action})
             # Léger délai pour laisser partir la réponse HTTP avant l'arrêt des services.
-            threading.Timer(2, lambda: subprocess.run(["systemctl", action], timeout=30)).start()
+            threading.Timer(2, power_action, [action]).start()
             return
         if path in ("/api/services/start", "/api/services/restart"):
             if not service_action(path.rsplit("/", 1)[1], parse_qs(query).get("unit", [""])[0]):
                 return self.send(403, {"error": "unité ou action non autorisée"})
             return self.send(200, {"ok": True})
+        action = {"/api/cloud/start": "start", "/api/cloud/stop": "stop"}.get(path)
+        if action:
+            stack_power(CLOUD_DIR, action)
+            return self.send(200, cloud_info())
+        action = {"/api/share/start": "start", "/api/share/stop": "stop"}.get(path)
+        if action:
+            stack_power(SHARE_DIR, action)
+            return self.send(200, share_info())
         action = {"/api/minecraft/start": "start", "/api/minecraft/stop": "stop"}.get(path)
         if action:
             return self.send(200, {"state": minecraft(action), "port": MINECRAFT_PORT})
@@ -408,6 +667,12 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/api/services":
             return self.send(200, services())
+        if path == "/api/share":
+            return self.send(200, share_info())
+        if path == "/api/cloud":
+            return self.send(200, cloud_info())
+        if path == "/api/autowake":
+            return self.send(200, autowake_info())
         if path == "/api/comfyui":
             return self.send(200, {"state": comfyui("is-active"), "port": COMFY_PORT})
         if path == "/api/minecraft":

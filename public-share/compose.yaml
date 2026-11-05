@@ -1,0 +1,28 @@
+name: public-share
+
+# Service volontairement isolé : ne voit que Nextcloud/Public, en lecture seule,
+# et son réseau Docker est distinct de celui de Nextcloud.
+services:
+  share:
+    image: filebrowser/filebrowser:v2
+    restart: unless-stopped
+    user: "33:33"
+    entrypoint: ["filebrowser"]
+    command: ["--database", "/db/filebrowser.db"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      disable: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - /data/nextcloud/data/adrien/files/Public:/srv:ro
+      - ./db:/db
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

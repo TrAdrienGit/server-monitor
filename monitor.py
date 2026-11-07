@@ -48,6 +48,8 @@ COMFY_PORT = int(setting("comfyui_port", "8188"))
 MINECRAFT_USER = setting("minecraft_user", "")
 MINECRAFT_UNIT = setting("minecraft_unit", "minecraft.service")
 MINECRAFT_PORT = int(setting("minecraft_port", "25565"))
+MINECRAFT_TEST_UNIT = setting("minecraft_test_unit", "minecraft-test.service")
+MINECRAFT_TEST_PORT = int(setting("minecraft_test_port", "25566"))
 
 
 def user_unit(user, unit, action):
@@ -73,6 +75,11 @@ def comfyui(action):
 def minecraft(action):
     """La seule unité utilisateur du serveur Minecraft (arrêt : le monde est sauvegardé, d'où --no-block)."""
     return user_unit(MINECRAFT_USER, MINECRAFT_UNIT, action)
+
+
+def minecraft_test(action):
+    """L'unité utilisateur du serveur Minecraft de test, du même utilisateur."""
+    return user_unit(MINECRAFT_USER, MINECRAFT_TEST_UNIT, action)
 
 
 def service_catalog():
@@ -653,6 +660,9 @@ class Handler(BaseHTTPRequestHandler):
         if action:
             stack_power(SHARE_DIR, action)
             return self.send(200, share_info())
+        action = {"/api/minecraft-test/start": "start", "/api/minecraft-test/stop": "stop"}.get(path)
+        if action:
+            return self.send(200, {"state": minecraft_test(action), "port": MINECRAFT_TEST_PORT})
         action = {"/api/minecraft/start": "start", "/api/minecraft/stop": "stop"}.get(path)
         if action:
             return self.send(200, {"state": minecraft(action), "port": MINECRAFT_PORT})
@@ -675,6 +685,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, autowake_info())
         if path == "/api/comfyui":
             return self.send(200, {"state": comfyui("is-active"), "port": COMFY_PORT})
+        if path == "/api/minecraft-test":
+            return self.send(200, {"state": minecraft_test("is-active"), "port": MINECRAFT_TEST_PORT})
         if path == "/api/minecraft":
             return self.send(200, {"state": minecraft("is-active"), "port": MINECRAFT_PORT})
         if path == "/":

@@ -90,6 +90,11 @@
     <div style="margin:8px 0"><button id="mcBtn" disabled>…</button></div>
     <div class="mut" id="mcAddr"></div>
     <div class="mut">Cobblemon Academy, 4 Go de RAM au plus ; environ 1 minute pour démarrer. L'arrêt sauvegarde le monde.</div></div>
+  <div class="card"><h2>Serveur Minecraft de test</h2>
+    <div class="big" id="mtState">–</div>
+    <div style="margin:8px 0"><button id="mtBtn" disabled>…</button></div>
+    <div class="mut" id="mtAddr"></div>
+    <div class="mut">Monde léger pour les tests, 3 Go de RAM au plus. L'arrêt sauvegarde le monde.</div></div>
   <div class="card"><h2>Cloud</h2>
     <div class="big" id="clState">–</div>
     <div style="margin:8px 0"><button id="clBtn" disabled>…</button> <a id="clLink" href="#" target="_blank" rel="noopener" hidden>Ouvrir Nextcloud ↗</a></div>
@@ -463,6 +468,26 @@ function renderMinecraft(c) {
   $("mcAddr").textContent = `Adresse : ${location.hostname}:${c.port}`;
 }
 async function refreshMinecraft() { renderMinecraft(await (await fetch("api/minecraft")).json()); }
+// ---------- Serveur Minecraft de test ----------
+let mtState = null;
+function renderMinecraftTest(c) {
+  mtState = c.state;
+  const on = c.state === "active" || c.state === "activating";
+  $("mtState").textContent = CU_LABEL[c.state] || c.state;
+  $("mtState").className = "big " + (c.state === "active" ? "ok" : c.state === "failed" ? "bad" : "");
+  $("mtBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("mtBtn").disabled = c.state === "indisponible" || c.state === "deactivating";
+  $("mtAddr").textContent = `Adresse : ${location.hostname}:${c.port}`;
+}
+async function refreshMinecraftTest() { renderMinecraftTest(await (await fetch("api/minecraft-test")).json()); }
+$("mtBtn").addEventListener("click", async () => {
+  const on = mtState === "active" || mtState === "activating";
+  if (on && !confirm("Éteindre le serveur de test ? Les joueurs connectés seront déconnectés (le monde est sauvegardé).")) return;
+  $("mtBtn").disabled = true;
+  const r = await fetch("api/minecraft-test/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderMinecraftTest(await r.json());
+  setTimeout(() => refreshMinecraftTest().catch(() => {}), 3000);
+});
 $("mcBtn").addEventListener("click", async () => {
   const on = mcState === "active" || mcState === "activating";
   if (on && !confirm("Éteindre le serveur Minecraft ? Les joueurs connectés seront déconnectés (le monde est sauvegardé).")) return;
@@ -532,6 +557,7 @@ $("cuBtn").addEventListener("click", async () => {
 const safe = f => () => f().catch(err => console.error(err));
 safe(refreshStats)(); safe(refreshChart)(); safe(refreshErrors)(); safe(refreshComfy)(); setInterval(safe(refreshComfy), 5000);
 safe(refreshMinecraft)(); setInterval(safe(refreshMinecraft), 5000);
+safe(refreshMinecraftTest)(); setInterval(safe(refreshMinecraftTest), 5000);
 safe(refreshAutowake)(); setInterval(safe(refreshAutowake), 10000);
 safe(refreshCloud)(); setInterval(safe(refreshCloud), 5000);
 safe(refreshShare)(); setInterval(safe(refreshShare), 5000);

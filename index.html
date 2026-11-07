@@ -106,6 +106,12 @@
     <div id="shUsed">–</div>
     <div class="mut" id="shMeta"></div>
     <div class="mut">Les fichiers se déposent dans Nextcloud, dossier Public. Dans les liens envoyés, remplacer :9443 par :10000.</div></div>
+  <div class="card"><h2>Transcription</h2>
+    <div class="big" id="trState">–</div>
+    <div style="margin:8px 0"><button id="trBtn" disabled>…</button> <a id="trLink" href="#" target="_blank" rel="noopener" hidden>Choisir les fichiers ↗</a></div>
+    <div id="trCurrent"></div><div class="bar"><div id="trBar"></div></div>
+    <div class="mut" id="trMeta"></div>
+    <div class="mut" id="trError"></div></div>
   <div class="card"><h2>Alimentation</h2>
     <div><button id="pwReboot">Redémarrer</button> <button id="pwOff" style="background:var(--bad)">Éteindre</button></div>
     <div class="mut" style="margin-top:8px" id="pwNote">Éteindre coupe tous les services (PdC, Phantasmon…) et annule le rallumage automatique. Pour rallumer : Wake-on-LAN depuis le réseau local (script wake-server).</div></div>
@@ -496,6 +502,34 @@ $("mcBtn").addEventListener("click", async () => {
   renderMinecraft(await r.json());
   setTimeout(() => refreshMinecraft().catch(() => {}), 3000);
 });
+// ---------- Transcription ----------
+let trState = null;
+const TR_PHASE = {attente: "En attente de ton choix", chargement: "Chargement du modèle…", transcription: "Transcription en cours"};
+function renderTranscribe(c) {
+  trState = c.state;
+  const s = c.status || {}, on = c.state === "active" || c.state === "activating";
+  const label = c.state === "active" ? (TR_PHASE[s.phase] || "En ligne") : ({inactive: "Hors ligne"}[c.state] || CU_LABEL[c.state] || c.state);
+  $("trState").textContent = label;
+  $("trState").className = "big " + (c.state === "active" ? "ok" : "");
+  $("trBtn").textContent = on ? "Éteindre" : "Allumer";
+  $("trBtn").disabled = c.state === "deactivating";
+  $("trLink").href = c.url;
+  $("trLink").hidden = c.state !== "active";
+  const pct = c.state === "active" && s.progress != null ? s.progress * 100 : 0;
+  $("trCurrent").textContent = c.state === "active" && s.current ? `${s.current.split("/").pop()} : ${pct.toFixed(0)} %` : "";
+  bar("trBar", pct);
+  $("trMeta").textContent = [c.state === "active" ? `${s.pending ?? 0} en file` : "Éteint : aucun fichier n'est traité", c.state === "active" ? `${s.done ?? 0} terminé(s)` : "", c.state === "active" && s.speed ? `vitesse ×${s.speed}` : "", s.model ? `modèle ${s.model}` : ""].filter(Boolean).join(" · ");
+  $("trError").textContent = c.state === "active" && s.failed ? `${s.failed} en échec. Dernière erreur : ${s.last_error || "–"}` : "";
+}
+async function refreshTranscribe() { renderTranscribe(await (await fetch("api/transcribe")).json()); }
+$("trBtn").addEventListener("click", async () => {
+  const on = trState !== "inactive";
+  if (on && !confirm("Éteindre la transcription ? Le fichier en cours et la file d'attente seront abandonnés.")) return;
+  $("trBtn").disabled = true;
+  const r = await fetch("api/transcribe/" + (on ? "stop" : "start"), {method: "POST", headers: {"X-Monitor-Action": "1"}});
+  renderTranscribe(await r.json());
+});
+
 // ---------- Partage de fichiers ----------
 let shState = null;
 function renderShare(c) {
@@ -561,6 +595,7 @@ safe(refreshMinecraftTest)(); setInterval(safe(refreshMinecraftTest), 5000);
 safe(refreshAutowake)(); setInterval(safe(refreshAutowake), 10000);
 safe(refreshCloud)(); setInterval(safe(refreshCloud), 5000);
 safe(refreshShare)(); setInterval(safe(refreshShare), 5000);
+safe(refreshTranscribe)(); setInterval(safe(refreshTranscribe), 5000);
 setInterval(safe(refreshStats), 3000); setInterval(safe(refreshChart), 60000); setInterval(safe(refreshErrors), 60000);
 </script>
 </body>

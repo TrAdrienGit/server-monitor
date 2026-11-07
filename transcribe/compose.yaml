@@ -1,0 +1,44 @@
+name: transcribe
+
+secrets:
+  nextcloud:
+    file: ./secrets/nextcloud
+
+networks:
+  nextcloud:
+    external: true
+    name: nextcloud_default
+
+services:
+  worker:
+    build: ./build
+    image: local/transcribe:2
+    # Allumé et éteint uniquement à la main : ne repart jamais seul.
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Limité pour laisser de la marge à PdC et ménager la température.
+    cpus: 4.0
+    cpu_shares: 256
+    mem_limit: 6g
+    environment:
+      TRANSCRIBE_MODEL: large-v3-turbo
+      TRANSCRIBE_THREADS: "4"
+      TRANSCRIBE_LANGUAGE: fr
+    secrets: [nextcloud]
+    networks: [nextcloud]
+    ports:
+      - "127.0.0.1:8093:8080"
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./models:/models
+      - ./state:/state
+      - ./work:/work
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

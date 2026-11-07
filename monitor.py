@@ -434,6 +434,21 @@ def stack_containers(folder):
     return containers
 
 
+TRANSCRIBE_DIR = Path("/data/transcribe")
+
+
+def transcribe_info():
+    containers = stack_containers(TRANSCRIBE_DIR)
+    running = any(c["state"] == "running" for c in containers)
+    state = _stack_busy.get(TRANSCRIBE_DIR) or ("active" if running else "inactive")
+    try:
+        status = json.loads((TRANSCRIBE_DIR / "state" / "status.json").read_text())
+    except (OSError, ValueError):
+        status = {}
+    return {"state": state, "status": status, "now": time.time(),
+            "url": "https://server-linux.tail192969.ts.net:9444"}
+
+
 def share_info():
     containers = stack_containers(SHARE_DIR)
     try:
@@ -656,6 +671,10 @@ class Handler(BaseHTTPRequestHandler):
         if action:
             stack_power(CLOUD_DIR, action)
             return self.send(200, cloud_info())
+        action = {"/api/transcribe/start": "start", "/api/transcribe/stop": "stop"}.get(path)
+        if action:
+            stack_power(TRANSCRIBE_DIR, action)
+            return self.send(200, transcribe_info())
         action = {"/api/share/start": "start", "/api/share/stop": "stop"}.get(path)
         if action:
             stack_power(SHARE_DIR, action)
@@ -677,6 +696,8 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/api/services":
             return self.send(200, services())
+        if path == "/api/transcribe":
+            return self.send(200, transcribe_info())
         if path == "/api/share":
             return self.send(200, share_info())
         if path == "/api/cloud":
